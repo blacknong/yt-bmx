@@ -93,7 +93,6 @@ jobs:
             echo "::group::关键词：$kw"
             yt-dlp "ytsearch${MAXN}:${kw}" \
               --dateafter "$SINCE" \
-              --match-filter "!duration | duration < 9000" \
               -f "bv*[height<=${MAXH}]+ba/b[height<=${MAXH}]/bv*+ba/b" \
               --merge-output-format mp4 \
               --extractor-args "youtube:player_client=default,web_safari,tv" \
@@ -105,7 +104,7 @@ jobs:
               $SIM \
               --print "%(upload_date)s\t%(duration_string)s\t%(uploader)s\t%(title)s\t%(webpage_url)s" \
               -o "out/%(upload_date)s_%(uploader).30B_%(title).70B_[%(id)s].%(ext)s" \
-              2>&1 | tee -a out/index.tsv
+              2>&1 | tee -a out/index.tsv || echo "::warning::关键词 [$kw] 有失败项，已跳过继续"
             echo "::endgroup::"
           done
 
