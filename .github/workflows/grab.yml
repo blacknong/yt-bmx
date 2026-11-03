@@ -1,6 +1,6 @@
 name: Grab YouTube BMX Flatland
 
-# 用途：在 GitHub 的海外机器上跑 yt-dlp，抓取指定关键词、指定时间窗内的 YouTube 视频，
+# 在 GitHub 的海外机器上跑 yt-dlp，抓取指定关键词、指定时间窗内的 YouTube 视频，
 # 打包成 artifact 并发布到 Release，供境内直接下载（不需要任何翻墙工具）。
 
 on:
@@ -15,9 +15,9 @@ on:
         required: true
         default: '62'
       max_per_keyword:
-        description: '每个关键词最多取搜索结果条数'
+        description: '每个关键词最多取搜索结果条数（越大越全，也越慢）'
         required: true
-        default: '40'
+        default: '60'
       max_height:
         description: '最高分辨率：1080 / 720 / 480'
         required: true
@@ -27,8 +27,8 @@ on:
         required: true
         default: 'false'
   schedule:
-    # 每月 2 号 UTC 20:00（北京时间 3 号 04:00）自动抓一次上月新片
-    - cron: '0 20 2 * *'
+    # 每月 3 号 UTC 20:00（北京时间 4 号 04:00）自动抓一次
+    - cron: '0 20 3 * *'
 
 permissions:
   contents: write
@@ -44,7 +44,7 @@ jobs:
     env:
       KEYWORDS: ${{ github.event.inputs.keywords || 'BMX flatland,flatland BMX,BMX flatland battle,FISE BMX flatland,BMX flatland edit' }}
       DAYS_BACK: ${{ github.event.inputs.days_back || '62' }}
-      MAXN: ${{ github.event.inputs.max_per_keyword || '40' }}
+      MAXN: ${{ github.event.inputs.max_per_keyword || '60' }}
       MAXH: ${{ github.event.inputs.max_height || '1080' }}
       DRY: ${{ github.event.inputs.dry_run || 'false' }}
       YT_COOKIES: ${{ secrets.YT_COOKIES }}
@@ -60,7 +60,7 @@ jobs:
             echo "已注入 cookies，将带登录态抓取"
           else
             echo "COOKIE_ARG=" >> "$GITHUB_ENV"
-            echo "未配置 cookies，走匿名抓取（若遇 bot 校验请见 README 第 4 节）"
+            echo "未配置 cookies，走匿名抓取"
           fi
 
       - name: 安装 yt-dlp 与 ffmpeg
@@ -75,23 +75,25 @@ jobs:
         run: |
           SINCE=$(date -u -d "$DAYS_BACK days ago" +%Y%m%d)
           echo "since=$SINCE" >> "$GITHUB_OUTPUT"
-          echo "时间窗起点（UTC）: $SINCE ｜ 关键词: $KEYWORDS"
+          echo "时间窗起点（UTC）: $SINCE ｜ 关键词: $KEYWORDS ｜ 每词上限: $MAXN"
 
       - name: 抓取
         run: |
           set -uo pipefail
           mkdir -p out
+          : > out/index.tsv
           SINCE='${{ steps.win.outputs.since }}'
-          if [ "$DRY" = "true" ]; then DRYMODE="--simulate --print %(upload_date)s|%(duration)s|%(uploader)s|%(title)s|%(webpage_url)s"; else DRYMODE=""; fi
+          # --print 会隐式开启 --simulate，所以正式下载必须显式 --no-simulate
+          if [ "$DRY" = "true" ]; then SIM="--simulate"; else SIM="--no-simulate"; fi
 
           IFS=',' read -ra KWS <<< "$KEYWORDS"
           for raw in "${KWS[@]}"; do
             kw=$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             [ -z "$kw" ] && continue
             echo "::group::关键词：$kw"
-            yt-dlp "ytsearchdate${MAXN}:${kw}" \
+            yt-dlp "ytsearch${MAXN}:${kw}" \
               --dateafter "$SINCE" \
-              --match-filter "duration < 9000" \
+              --match-filter "!duration | duration < 9000" \
               -f "bv*[height<=${MAXH}]+ba/b[height<=${MAXH}]/bv*+ba/b" \
               --merge-output-format mp4 \
               --extractor-args "youtube:player_client=default,web_safari,tv" \
@@ -100,35 +102,45 @@ jobs:
               --sleep-requests 1.2 --no-progress \
               --download-archive .archive.txt \
               --no-overwrites \
-              --write-info-json \
-              --no-warnings \
+              $SIM \
+              --print "%(upload_date)s\t%(duration_string)s\t%(uploader)s\t%(title)s\t%(webpage_url)s" \
               -o "out/%(upload_date)s_%(uploader).30B_%(title).70B_[%(id)s].%(ext)s" \
-              $DRYMODE || echo "::warning::关键词 [$kw] 抓取过程中有失败项，已跳过继续"
+              2>&1 | tee -a out/index.tsv
             echo "::endgroup::"
           done
 
       - name: 生成索引
         run: |
           python3 - <<'PY'
-          import json, csv, glob, os
-          rows = []
-          for p in glob.glob('out/*.info.json'):
-              try:
-                  d = json.load(open(p, encoding='utf-8'))
-              except Exception:
+          import csv, re
+          rows, seen = [], set()
+          try:
+              lines = open('out/index.tsv', encoding='utf-8', errors='replace').read().splitlines()
+          except FileNotFoundError:
+              lines = []
+          for ln in lines:
+              ln = ln.strip()
+              if not re.match(r'^\d{8}\t', ln):
                   continue
-              rows.append([
-                  d.get('upload_date',''), d.get('duration_string',''),
-                  d.get('uploader',''), d.get('title',''),
-                  d.get('view_count',''), d.get('webpage_url',''),
-                  d.get('filesize_approx') or d.get('filesize') or '',
-              ])
-          rows.sort(key=lambda r: (r[0] or ''), reverse=True)
-          with open('out/index.csv','w',encoding='utf-8-sig',newline='') as f:
+              parts = ln.split('\t')
+              if len(parts) < 5:
+                  continue
+              url = parts[4]
+              if url in seen:
+                  continue
+              seen.add(url)
+              rows.append(parts[:5])
+          rows.sort(key=lambda r: r[0], reverse=True)
+          with open('out/index.csv', 'w', encoding='utf-8-sig', newline='') as f:
               w = csv.writer(f)
-              w.writerow(['发布日期','时长','频道','标题','播放','链接','字节'])
+              w.writerow(['发布日期', '时长', '频道', '标题', '链接'])
               w.writerows(rows)
-          print(f'索引 {len(rows)} 条')
+          print(f'索引 {len(rows)} 条（去重后）')
+          print()
+          for r in rows[:40]:
+              print(f'{r[0]}  {r[1]:>8}  {r[2][:24]:<26} {r[3][:60]}')
+          if len(rows) > 40:
+              print(f'… 其余 {len(rows)-40} 条见 index.csv')
           PY
 
       - name: 统计
@@ -137,9 +149,10 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           COUNT=$(ls out/*.mp4 out/*.mkv out/*.webm 2>/dev/null | wc -l)
           SIZE=$(du -sh out 2>/dev/null | cut -f1)
-          echo "- 视频文件：**${COUNT}** 个" >> "$GITHUB_STEP_SUMMARY"
-          echo "- 总体积：**${SIZE}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 模式：**${{ env.DRY == 'true' && '试跑（未下载）' || '正式下载' }}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 视频文件：**${COUNT}** 个 ｜ 总体积：**${SIZE}**" >> "$GITHUB_STEP_SUMMARY"
           echo "- 时间窗起点：\`${{ steps.win.outputs.since }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 关键词：\`$KEYWORDS\`" >> "$GITHUB_STEP_SUMMARY"
           ls -lh out | head -50
 
       - name: 上传 artifact
@@ -160,14 +173,17 @@ jobs:
           shopt -s nullglob
           FILES=(out/*.mp4 out/*.mkv out/*.webm out/index.csv)
           if [ ${#FILES[@]} -eq 0 ]; then echo "没有文件，跳过 Release"; exit 0; fi
-          # Release 单文件上限 2GB，超大的单独提示
+          BIG=0
           for f in "${FILES[@]}"; do
             sz=$(stat -c%s "$f")
-            if [ "$sz" -gt 2000000000 ]; then echo "::warning::文件超过 2GB，无法作为 Release 资产：$f"; fi
+            if [ "$sz" -gt 1800000000 ]; then
+              echo "::warning::超过 1.8GB，无法作为 Release 资产：$f"
+              BIG=$((BIG+1))
+            fi
           done
           gh release create "$TAG" "${FILES[@]}" \
             --title "BMX Flatland $TAG" \
-            --notes "由 GitHub Actions 自动抓取。时间窗起点 ${{ steps.win.outputs.since }}，关键词：$KEYWORDS。" \
+            --notes "时间窗起点 ${{ steps.win.outputs.since }}｜关键词：$KEYWORDS｜超大文件跳过 $BIG 个" \
             --latest=false
 
       - name: 回写去重记录
@@ -180,5 +196,5 @@ jobs:
             git commit -m "chore: 更新已下载记录 [skip ci]"
             git push
           else
-            echo "无新增记录"
+            echo "无新增去重记录"
           fi
