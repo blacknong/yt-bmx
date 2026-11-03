@@ -40,20 +40,35 @@
 **首跑务必先 `dry_run=true`**：几十秒就能看到解析出多少条、标题日期对不对，
 确认没问题再改 `false` 正式下。
 
-## 4. 如果撞上 "Sign in to confirm you're not a bot"
+## 4. ⚠️ 当前实测状态：机房 IP 被 YouTube 硬封
 
-GitHub 的 runner 是机房 IP，YouTube 对这类 IP 有机器人校验。症状是日志里出现
-`Sign in to confirm you're not a bot` 或大片 `403`。解法是带浏览器 Cookie：
+已在 Actions 上实测跑过：`default / web_safari / tv / ios / android / mweb / tv_simply / web_embedded`
+**八种客户端伪装全部返回** `Sign in to confirm you're not a bot`。
 
-1. 在你自己的电脑上装浏览器扩展 **Get cookies.txt LOCALLY**（Chrome/Edge 商店）
-2. 打开 <https://www.youtube.com>（需要你能访问，或用朋友/手机热点协助）
-3. 扩展点 **Export** → 存成 `cookies.txt`（Netscape 格式）
-4. 仓库 → **Settings → Secrets and variables → Actions → New repository secret**
-   - Name：`YT_COOKIES`
-   - Secret：把 `cookies.txt` 全文粘进去
-5. 重跑 workflow，会自动带上登录态
+这是 YouTube 对数据中心 IP 的风控，跟 yt-dlp 版本无关，换客户端无效。
+必须给 runner 换一张"像真人"的出口，两条路：
 
-> Cookie 有效期通常几天到几周，过期就重导一次。Secret 只有 Actions 能读，日志里不会回显。
+### 方案 A：加出口代理（推荐，一次配好长期有效）
+
+1. 你有任何可用代理（机场 / 住宅代理 / 海外 VPS 上的 squid 都行）
+2. 仓库 → **Settings → Secrets and variables → Actions → New repository secret**
+   - Name：`YT_PROXY`
+   - Secret：代理地址，格式 `http://user:pass@host:port` 或 `socks5://host:port`
+3. 重跑 workflow，会自动带 `--proxy` 抓取
+
+> 住宅/移动网络 IP 成功率最高；机房代理可能一样被拦。
+
+### 方案 B：借用 YouTube 登录 Cookie（免费，但会过期）
+
+1. 需要一个**能访问 YouTube 的人**帮忙：在自己浏览器装扩展
+   **Get cookies.txt LOCALLY**（Chrome/Edge 商店）
+2. 打开 <https://www.youtube.com> → 扩展点 **Export** → 存成 `cookies.txt`（Netscape 格式）
+3. 仓库 → Settings → Secrets and variables → Actions → New repository secret
+   - Name：`YT_COOKIES`，Secret：`cookies.txt` 全文
+4. 重跑 workflow
+
+> Cookie 通常几天到几周失效，失效后要重新导出。适合一次性把存量抓完，不适合长期定时。
+
 
 ## 5. 把视频拿回本机
 
