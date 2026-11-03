@@ -48,19 +48,26 @@ jobs:
       MAXH: ${{ github.event.inputs.max_height || '1080' }}
       DRY: ${{ github.event.inputs.dry_run || 'false' }}
       YT_COOKIES: ${{ secrets.YT_COOKIES }}
+      YT_PROXY: ${{ secrets.YT_PROXY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 写入 cookies（可选，用于对抗 YouTube 机房 IP 校验）
+      - name: 注入 cookies / 代理（可选）
         run: |
           if [ -n "${YT_COOKIES:-}" ]; then
             printf '%s\n' "$YT_COOKIES" > cookies.txt
             echo "COOKIE_ARG=--cookies cookies.txt" >> "$GITHUB_ENV"
-            echo "已注入 cookies，将带登录态抓取"
+            echo "已注入 cookies"
           else
             echo "COOKIE_ARG=" >> "$GITHUB_ENV"
-            echo "未配置 cookies，走匿名抓取"
+          fi
+          if [ -n "${YT_PROXY:-}" ]; then
+            echo "PROXY_ARG=--proxy $YT_PROXY" >> "$GITHUB_ENV"
+            echo "已配置出口代理"
+          else
+            echo "PROXY_ARG=" >> "$GITHUB_ENV"
+            echo "未配置代理（机房 IP 会被 YouTube 拦，见 README 第 4 节）"
           fi
 
       - name: 安装 yt-dlp 与 ffmpeg
@@ -98,6 +105,7 @@ jobs:
               --extractor-args "youtube:player_client=default,web_safari,tv" \
               --retries 5 --fragment-retries 10 \
               $COOKIE_ARG \
+              $PROXY_ARG \
               --sleep-requests 1.2 --no-progress \
               --download-archive .archive.txt \
               --no-overwrites \
