@@ -1,0 +1,23 @@
+name: ipcheck
+on:
+  workflow_dispatch:
+    inputs:
+      vurl:
+        description: 'googlevideo signed url'
+        required: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe signed url from overseas runner
+        env:
+          VURL: ${{ inputs.vurl }}
+        run: |
+          echo "URL length: ${#VURL}"
+          curl -s -D headers.txt -o first.bin -r 0-2047 --max-time 90 "$VURL" || true
+          echo "--- first line ---"
+          head -1 headers.txt
+          echo "--- bytes received ---"
+          wc -c first.bin
+          echo "--- selected headers ---"
+          grep -iE "^(HTTP/|content-type|content-length|content-range|location)" headers.txt | head -20
