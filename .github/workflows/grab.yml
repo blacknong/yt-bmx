@@ -1,0 +1,184 @@
+name: Grab YouTube BMX Flatland
+
+# 用途：在 GitHub 的海外机器上跑 yt-dlp，抓取指定关键词、指定时间窗内的 YouTube 视频，
+# 打包成 artifact 并发布到 Release，供境内直接下载（不需要任何翻墙工具）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      keywords:
+        description: '关键词，英文逗号分隔'
+        required: true
+        default: 'BMX flatland,flatland BMX,BMX flatland battle,FISE BMX flatland,BMX flatland edit'
+      days_back:
+        description: '只抓最近多少天内发布的（天）'
+        required: true
+        default: '62'
+      max_per_keyword:
+        description: '每个关键词最多取搜索结果条数'
+        required: true
+        default: '40'
+      max_height:
+        description: '最高分辨率：1080 / 720 / 480'
+        required: true
+        default: '1080'
+      dry_run:
+        description: '试跑：只列清单不下载（true/false）'
+        required: true
+        default: 'false'
+  schedule:
+    # 每月 2 号 UTC 20:00（北京时间 3 号 04:00）自动抓一次上月新片
+    - cron: '0 20 2 * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: grab-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  grab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      KEYWORDS: ${{ github.event.inputs.keywords || 'BMX flatland,flatland BMX,BMX flatland battle,FISE BMX flatland,BMX flatland edit' }}
+      DAYS_BACK: ${{ github.event.inputs.days_back || '62' }}
+      MAXN: ${{ github.event.inputs.max_per_keyword || '40' }}
+      MAXH: ${{ github.event.inputs.max_height || '1080' }}
+      DRY: ${{ github.event.inputs.dry_run || 'false' }}
+      YT_COOKIES: ${{ secrets.YT_COOKIES }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 写入 cookies（可选，用于对抗 YouTube 机房 IP 校验）
+        run: |
+          if [ -n "${YT_COOKIES:-}" ]; then
+            printf '%s\n' "$YT_COOKIES" > cookies.txt
+            echo "COOKIE_ARG=--cookies cookies.txt" >> "$GITHUB_ENV"
+            echo "已注入 cookies，将带登录态抓取"
+          else
+            echo "COOKIE_ARG=" >> "$GITHUB_ENV"
+            echo "未配置 cookies，走匿名抓取（若遇 bot 校验请见 README 第 4 节）"
+          fi
+
+      - name: 安装 yt-dlp 与 ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg >/dev/null
+          python3 -m pip install --quiet --upgrade "yt-dlp[default]"
+          yt-dlp --version
+
+      - name: 计算时间窗
+        id: win
+        run: |
+          SINCE=$(date -u -d "$DAYS_BACK days ago" +%Y%m%d)
+          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
+          echo "时间窗起点（UTC）: $SINCE ｜ 关键词: $KEYWORDS"
+
+      - name: 抓取
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          SINCE='${{ steps.win.outputs.since }}'
+          if [ "$DRY" = "true" ]; then DRYMODE="--simulate --print %(upload_date)s|%(duration)s|%(uploader)s|%(title)s|%(webpage_url)s"; else DRYMODE=""; fi
+
+          IFS=',' read -ra KWS <<< "$KEYWORDS"
+          for raw in "${KWS[@]}"; do
+            kw=$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [ -z "$kw" ] && continue
+            echo "::group::关键词：$kw"
+            yt-dlp "ytsearchdate${MAXN}:${kw}" \
+              --dateafter "$SINCE" \
+              --match-filter "duration < 9000" \
+              -f "bv*[height<=${MAXH}]+ba/b[height<=${MAXH}]/bv*+ba/b" \
+              --merge-output-format mp4 \
+              --extractor-args "youtube:player_client=default,web_safari,tv" \
+              --retries 5 --fragment-retries 10 \
+              $COOKIE_ARG \
+              --sleep-requests 1.2 --no-progress \
+              --download-archive .archive.txt \
+              --no-overwrites \
+              --write-info-json \
+              --no-warnings \
+              -o "out/%(upload_date)s_%(uploader).30B_%(title).70B_[%(id)s].%(ext)s" \
+              $DRYMODE || echo "::warning::关键词 [$kw] 抓取过程中有失败项，已跳过继续"
+            echo "::endgroup::"
+          done
+
+      - name: 生成索引
+        run: |
+          python3 - <<'PY'
+          import json, csv, glob, os
+          rows = []
+          for p in glob.glob('out/*.info.json'):
+              try:
+                  d = json.load(open(p, encoding='utf-8'))
+              except Exception:
+                  continue
+              rows.append([
+                  d.get('upload_date',''), d.get('duration_string',''),
+                  d.get('uploader',''), d.get('title',''),
+                  d.get('view_count',''), d.get('webpage_url',''),
+                  d.get('filesize_approx') or d.get('filesize') or '',
+              ])
+          rows.sort(key=lambda r: (r[0] or ''), reverse=True)
+          with open('out/index.csv','w',encoding='utf-8-sig',newline='') as f:
+              w = csv.writer(f)
+              w.writerow(['发布日期','时长','频道','标题','播放','链接','字节'])
+              w.writerows(rows)
+          print(f'索引 {len(rows)} 条')
+          PY
+
+      - name: 统计
+        run: |
+          echo "### 抓取结果" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          COUNT=$(ls out/*.mp4 out/*.mkv out/*.webm 2>/dev/null | wc -l)
+          SIZE=$(du -sh out 2>/dev/null | cut -f1)
+          echo "- 视频文件：**${COUNT}** 个" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 总体积：**${SIZE}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 时间窗起点：\`${{ steps.win.outputs.since }}\`" >> "$GITHUB_STEP_SUMMARY"
+          ls -lh out | head -50
+
+      - name: 上传 artifact
+        if: env.DRY != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bmx-flatland-${{ steps.win.outputs.since }}
+          path: out/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: 发布 Release（境内可直接下载，无需登录）
+        if: env.DRY != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="grab-$(date -u +%Y%m%d-%H%M)"
+          shopt -s nullglob
+          FILES=(out/*.mp4 out/*.mkv out/*.webm out/index.csv)
+          if [ ${#FILES[@]} -eq 0 ]; then echo "没有文件，跳过 Release"; exit 0; fi
+          # Release 单文件上限 2GB，超大的单独提示
+          for f in "${FILES[@]}"; do
+            sz=$(stat -c%s "$f")
+            if [ "$sz" -gt 2000000000 ]; then echo "::warning::文件超过 2GB，无法作为 Release 资产：$f"; fi
+          done
+          gh release create "$TAG" "${FILES[@]}" \
+            --title "BMX Flatland $TAG" \
+            --notes "由 GitHub Actions 自动抓取。时间窗起点 ${{ steps.win.outputs.since }}，关键词：$KEYWORDS。" \
+            --latest=false
+
+      - name: 回写去重记录
+        if: env.DRY != 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f .archive.txt ] && ! git diff --quiet -- .archive.txt; then
+            git add .archive.txt
+            git commit -m "chore: 更新已下载记录 [skip ci]"
+            git push
+          else
+            echo "无新增记录"
+          fi
